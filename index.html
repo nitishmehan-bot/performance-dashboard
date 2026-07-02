@@ -1,0 +1,334 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Game Performance Suite</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        .custom-scrollbar::-webkit-scrollbar { height: 10px; }
+        .custom-scrollbar::-webkit-scrollbar-track { background: #1f2937; border-radius: 8px; }
+        .custom-scrollbar::-webkit-scrollbar-thumb { background: #374151; border-radius: 8px; }
+        .custom-scrollbar::-webkit-scrollbar-thumb:hover { background: #4b5563; }
+    </style>
+</head>
+<body class="bg-gray-900 text-gray-100 font-sans min-h-screen p-8">
+
+    <div class="max-w-7xl mx-auto">
+        <header class="mb-8 border-b border-gray-800 pb-4">
+            <h1 class="text-3xl font-bold text-emerald-400 tracking-wide">Performance Observability Lab</h1>
+            <p class="text-gray-400 mt-1">Context-Aware Enterprise Automation Suite</p>
+        </header>
+
+        <div class="bg-gray-800 border border-gray-700 rounded-xl p-6 shadow-lg mb-8">
+            <h2 class="text-lg font-semibold mb-4 text-gray-200 uppercase tracking-wider">Test Configuration</h2>
+            <form id="configForm" class="grid grid-cols-1 md:grid-cols-4 gap-4 items-end">
+                <div>
+                    <label class="block text-sm text-gray-400 mb-2">Application Package ID</label>
+                    <input type="text" id="packageName" required placeholder="e.g. in.playsimple.escapearrow" class="w-full bg-gray-900 border border-gray-700 rounded-lg p-2.5 text-gray-100 focus:outline-none focus:border-emerald-500 font-mono">
+                </div>
+                <div>
+                    <label class="block text-sm text-gray-400 mb-2">Upload Profile APK File</label>
+                    <input type="file" id="apkFile" required accept=".apk" class="w-full bg-gray-900 border border-gray-700 rounded-lg p-1.5 text-sm text-gray-300 file:mr-4 file:py-1 file:px-3 file:rounded-md file:border-0 file:text-sm file:font-semibold file:bg-emerald-600 file:text-white hover:file:bg-emerald-700 cursor-pointer">
+                </div>
+                <div class="col-span-2 flex gap-3">
+                    <button type="button" id="startBtn" onclick="triggerStart()" class="flex-1 bg-emerald-600 hover:bg-emerald-700 text-white font-bold py-2.5 px-3 rounded-lg transition duration-200">Launch & Record</button>
+                    <button type="button" id="stopBtn" onclick="triggerStop()" disabled class="flex-1 bg-rose-600 hover:bg-rose-700 disabled:bg-gray-700 text-white font-bold py-2.5 px-3 rounded-lg transition duration-200 cursor-not-allowed">Stop</button>
+                    <button type="button" id="exportBtn" onclick="triggerExcelDownload()" disabled class="flex-1 bg-blue-600 hover:bg-blue-700 disabled:bg-gray-700 text-white font-bold py-2.5 px-3 rounded-lg transition duration-200 cursor-not-allowed">Excel RCA</button>
+                    <button type="button" id="exportMdBtn" onclick="triggerMdDownload()" disabled class="flex-1 bg-purple-600 hover:bg-purple-700 disabled:bg-gray-700 text-white font-bold py-2.5 px-3 rounded-lg transition duration-200 cursor-not-allowed">MD Audit</button>
+                </div>
+            </form>
+            <p id="statusFeedback" class="text-sm mt-4 text-gray-400 hidden font-medium"></p>
+        </div>
+
+        <div id="metricsMatrix" class="grid grid-cols-1 md:grid-cols-4 gap-6 mb-8 opacity-40 transition-opacity duration-300">
+            <div class="bg-gray-800 border border-gray-700 rounded-xl p-6 shadow-lg"><p class="text-sm font-semibold uppercase tracking-wider text-gray-400">System Health Score</p><p id="health-score" class="text-4xl font-extrabold mt-2 text-emerald-400">--</p></div>
+            <div class="bg-gray-800 border border-gray-700 rounded-xl p-6 shadow-lg"><p class="text-sm font-semibold uppercase tracking-wider text-gray-400">Overall Jank Ratio</p><p id="jank-percentage" class="text-4xl font-extrabold mt-2 text-amber-400">--</p></div>
+            <div class="bg-gray-800 border border-gray-700 rounded-xl p-6 shadow-lg"><p class="text-sm font-semibold uppercase tracking-wider text-gray-400">Avg UI Thread Time</p><p id="avg-ui" class="text-4xl font-extrabold mt-2 text-blue-400">--</p></div>
+            <div class="bg-gray-800 border border-gray-700 rounded-xl p-6 shadow-lg"><p class="text-sm font-semibold uppercase tracking-wider text-gray-400">Avg Raster Thread Time</p><p id="avg-raster" class="text-4xl font-extrabold mt-2 text-purple-400">--</p></div>
+        </div>
+
+        <div class="bg-gray-800 border border-gray-700 rounded-xl p-6 shadow-lg mb-8">
+            <h3 class="text-md font-semibold text-gray-300 mb-4 uppercase tracking-wider">Frame Rendering Latency & Event Diagnostics</h3>
+            <div id="frameScrollWrapper" class="w-full overflow-x-auto overflow-y-hidden custom-scrollbar pb-3">
+                <div id="frameChartContainer" class="relative h-[320px]" style="min-width: 100%;">
+                    <canvas id="telemetryChart"></canvas>
+                </div>
+            </div>
+        </div>
+
+        <div class="bg-gray-800 border border-gray-700 rounded-xl p-6 shadow-lg mb-8">
+            <h3 class="text-md font-semibold text-gray-300 mb-4 uppercase tracking-wider">Hardware Power & Thermals Tracking</h3>
+            <div id="batteryScrollWrapper" class="w-full overflow-x-auto overflow-y-hidden custom-scrollbar pb-3">
+                <div id="batteryChartContainer" class="relative h-[240px]" style="min-width: 100%;">
+                    <canvas id="batteryChart"></canvas>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let frameChart = null;
+        let batteryChart = null;
+        let liveInterval = null;
+        let framePointer = 0;
+        let batteryPointer = 0;
+        let activeFrameCache = [];
+
+        const thresholdLinePlugin = {
+            id: 'jankThresholdLine',
+            afterDraw: function(chart) {
+                if (chart.scales.y) {
+                    const yScale = chart.scales.y;
+                    const yPixel = yScale.getPixelForValue(16.6);
+                    const ctx = chart.ctx;
+                    if(yPixel >= chart.chartArea.top && yPixel <= chart.chartArea.bottom) {
+                        ctx.save(); ctx.beginPath();
+                        ctx.moveTo(chart.chartArea.left, yPixel); ctx.lineTo(chart.chartArea.right, yPixel);
+                        ctx.lineWidth = 2; ctx.strokeStyle = '#f43f5e'; ctx.setLineDash([6, 4]); ctx.stroke(); ctx.restore();
+                    }
+                }
+            }
+        };
+
+        function updateFeedback(text, isError = false) {
+            const el = document.getElementById('statusFeedback');
+            el.className = `text-sm mt-4 font-medium ${isError ? 'text-rose-400' : 'text-emerald-400'}`;
+            el.textContent = text; el.classList.remove('hidden');
+        }
+
+        function resizeChartCanvas(chartObj, containerId) {
+            if(!chartObj) return;
+            const dataLength = chartObj.data.labels.length;
+            const requiredWidthPx = dataLength * 12; 
+            const container = document.getElementById(containerId);
+            const parentWidth = container.parentElement.clientWidth;
+            container.style.minWidth = Math.max(parentWidth, requiredWidthPx) + 'px';
+        }
+
+        function initializeCharts() {
+            if (frameChart) { frameChart.destroy(); }
+            if (batteryChart) { batteryChart.destroy(); }
+            framePointer = 0; batteryPointer = 0; activeFrameCache = [];
+
+            const ctxFrame = document.getElementById('telemetryChart').getContext('2d');
+            frameChart = new Chart(ctxFrame, {
+                type: 'line', plugins: [thresholdLinePlugin],
+                data: { labels: [], datasets: [
+                    { label: 'UI Thread (Dart)', data: [], borderColor: '#3b82f6', backgroundColor: 'rgba(59, 130, 246, 0.05)', borderWidth: 2, pointRadius: [], pointBackgroundColor: '#f43f5e', pointBorderColor: '#fff', pointBorderWidth: 2, fill: true, tension: 0.1 },
+                    { label: 'Raster Thread (GPU)', data: [], borderColor: '#a855f7', backgroundColor: 'rgba(168, 85, 247, 0.05)', borderWidth: 2, pointRadius: [], pointBackgroundColor: '#f43f5e', pointBorderColor: '#fff', pointBorderWidth: 2, fill: true, tension: 0.1 }
+                ]},
+                options: { 
+                    responsive: true, maintainAspectRatio: false, animation: false, 
+                    scales: { x: { grid: { color: '#374151' }, ticks: { color: '#9ca3af', maxTicksLimit: 20 } }, y: { grid: { color: '#374151' }, ticks: { color: '#9ca3af' }, suggestedMax: 20 } }, 
+                    plugins: { 
+                        legend: { labels: { color: '#f3f4f6' } },
+                        tooltip: {
+                            callbacks: {
+                                footer: function(context) {
+                                    const idx = context[0].dataIndex;
+                                    const frameObj = activeFrameCache[idx];
+                                    if(frameObj && frameObj.triggered_event && frameObj.triggered_event !== "None") {
+                                        return `⚡ OS Event: ${frameObj.triggered_event}`;
+                                    }
+                                    return null;
+                                }
+                            }
+                        }
+                    } 
+                }
+            });
+
+            const ctxBattery = document.getElementById('batteryChart').getContext('2d');
+            batteryChart = new Chart(ctxBattery, {
+                type: 'line',
+                data: { labels: [], datasets: [
+                    { label: 'Battery Capacity (%)', data: [], borderColor: '#10b981', borderWidth: 2, pointRadius: 0, yAxisID: 'yLeft', tension: 0.1 },
+                    { label: 'Core Temperature (°C)', data: [], borderColor: '#f97316', borderWidth: 2, pointRadius: 0, yAxisID: 'yRight', tension: 0.1 }
+                ]},
+                options: {
+                    responsive: true, maintainAspectRatio: false, animation: false,
+                    scales: {
+                        x: { grid: { color: '#374151' }, ticks: { color: '#9ca3af', maxTicksLimit: 20 } },
+                        yLeft: { position: 'left', grid: { color: '#374151' }, ticks: { color: '#10b981' }, min: 0, max: 100 },
+                        yRight: { position: 'right', grid: { drawOnChartArea: false }, ticks: { color: '#f97316' }, suggestedMin: 25, suggestedMax: 45 }
+                    },
+                    plugins: { legend: { labels: { color: '#f3f4f6' } } }
+                }
+            });
+        }
+
+        async function triggerStart() {
+            const pkg = document.getElementById('packageName').value;
+            const apk = document.getElementById('apkFile').files[0];
+            if(!pkg || !apk) { alert("Complete configurations first."); return; }
+
+            updateFeedback("[*] Compiling hardware links, installing package artifact instance...");
+            document.getElementById('startBtn').disabled = true;
+            document.getElementById('metricsMatrix').classList.add('opacity-40');
+            
+            initializeCharts();
+
+            const formData = new FormData();
+            formData.append('package_name', pkg); formData.append('apk', apk);
+
+            try {
+                const res = await fetch('/api/start', { method: 'POST', body: formData });
+                const data = await res.json();
+                if(data.success) {
+                    updateFeedback("[+] PIPELINE SECURED! Play the game now and watch events trace into your dashboard...", false);
+                    document.getElementById('stopBtn').disabled = false;
+                    liveInterval = setInterval(pollLiveTelemetry, 400);
+                } else {
+                    alert(`Fault: ${data.error}`); document.getElementById('startBtn').disabled = false;
+                }
+            } catch (err) { alert("Connection fault."); document.getElementById('startBtn').disabled = false; }
+        }
+
+        async function pollLiveTelemetry() {
+            try {
+                const res = await fetch(`/api/live?frame_start=${framePointer}&battery_start=${batteryPointer}`);
+                const data = await res.json();
+
+                if (data.new_frames && data.new_frames.length > 0) {
+                    data.new_frames.forEach(f => {
+                        frameChart.data.labels.push(`F-${f.frame_id}`);
+                        frameChart.data.datasets[0].data.push(f.ui_time_ms);
+                        frameChart.data.datasets[1].data.push(f.raster_time_ms);
+                        
+                        const hasEvent = f.triggered_event && f.triggered_event !== "None";
+                        const dotSize = hasEvent ? 7 : 0;
+                        frameChart.data.datasets[0].pointRadius.push(dotSize);
+                        frameChart.data.datasets[1].pointRadius.push(dotSize);
+                        
+                        activeFrameCache.push(f);
+                    });
+                    framePointer += data.new_frames.length;
+                    
+                    if (frameChart.data.labels.length > 2000) {
+                        frameChart.data.labels.shift(); 
+                        frameChart.data.datasets[0].data.shift(); 
+                        frameChart.data.datasets[1].data.shift();
+                        frameChart.data.datasets[0].pointRadius.shift();
+                        frameChart.data.datasets[1].pointRadius.shift();
+                        activeFrameCache.shift();
+                    }
+                    
+                    resizeChartCanvas(frameChart, 'frameChartContainer');
+                    frameChart.update();
+                    
+                    const fw = document.getElementById('frameScrollWrapper');
+                    fw.scrollLeft = fw.scrollWidth;
+                }
+
+                if (data.new_battery && data.new_battery.length > 0) {
+                    data.new_battery.forEach(b => {
+                        batteryChart.data.labels.push(`${b.time_sec}s`);
+                        batteryChart.data.datasets[0].data.push(b.battery_level);
+                        batteryChart.data.datasets[1].data.push(b.temperature_c);
+                    });
+                    batteryPointer += data.new_battery.length;
+                    
+                    resizeChartCanvas(batteryChart, 'batteryChartContainer');
+                    batteryChart.update();
+                    
+                    const bw = document.getElementById('batteryScrollWrapper');
+                    bw.scrollLeft = bw.scrollWidth;
+                }
+            } catch (err) { console.error("Polling fault:", err); }
+        }
+
+        async function triggerStop() {
+            clearInterval(liveInterval);
+            updateFeedback("[*] Finalizing structural reports calculations...");
+            document.getElementById('stopBtn').disabled = true;
+
+            try {
+                const res = await fetch('/api/stop', { method: 'POST' });
+                const data = await res.json();
+                if(data.success) {
+                    updateFeedback("[+] Run analysis completed cleanly!");
+                    document.getElementById('metricsMatrix').classList.remove('opacity-40');
+                    document.getElementById('exportBtn').disabled = false;
+                    document.getElementById('exportBtn').classList.remove('cursor-not-allowed');
+                    
+                    // UNLOCK THE NEW MD BUTTON
+                    document.getElementById('exportMdBtn').disabled = false;
+                    document.getElementById('exportMdBtn').classList.remove('cursor-not-allowed');
+
+                    const r = data.report;
+                    document.getElementById('health-score').textContent = `${r.summary.health_score}/100`;
+                    document.getElementById('jank-percentage').textContent = `${r.summary.jank_percentage}%`;
+                    document.getElementById('avg-ui').textContent = `${r.summary.average_ui_time_ms}ms`;
+                    document.getElementById('avg-raster').textContent = `${r.summary.average_raster_time_ms}ms`;
+
+                    renderFinalCharts(r.frames, r.battery);
+                }
+            } catch (err) { alert("Processing timeout."); } finally { document.getElementById('startBtn').disabled = false; }
+        }
+
+        function renderFinalCharts(frames, battery) {
+            if(frameChart) frameChart.destroy();
+            if(batteryChart) batteryChart.destroy();
+            
+            activeFrameCache = frames;
+
+            const ctxF = document.getElementById('telemetryChart').getContext('2d');
+            frameChart = new Chart(ctxF, {
+                type: 'line', plugins: [thresholdLinePlugin],
+                data: { labels: frames.map(f => `F-${f.frame_id}`), datasets: [
+                    { label: 'UI Thread (Dart)', data: frames.map(f => f.ui_time_ms), borderColor: '#3b82f6', backgroundColor: 'rgba(59, 130, 246, 0.05)', borderWidth: 2, pointRadius: frames.map(f => (f.triggered_event && f.triggered_event !== "None") ? 7 : 0), pointBackgroundColor: '#f43f5e', pointBorderColor: '#fff', pointBorderWidth: 2, fill: true, tension: 0.1 },
+                    { label: 'Raster Thread (GPU)', data: frames.map(f => f.raster_time_ms), borderColor: '#a855f7', backgroundColor: 'rgba(168, 85, 247, 0.05)', borderWidth: 2, pointRadius: frames.map(f => (f.triggered_event && f.triggered_event !== "None") ? 7 : 0), pointBackgroundColor: '#f43f5e', pointBorderColor: '#fff', pointBorderWidth: 2, fill: true, tension: 0.1 }
+                ]},
+                options: { 
+                    responsive: true, maintainAspectRatio: false, 
+                    scales: { x: { grid: { color: '#374151' }, ticks: { color: '#9ca3af', maxTicksLimit: 30 } }, y: { grid: { color: '#374151' }, ticks: { color: '#9ca3af' }, suggestedMax: 20 } }, 
+                    plugins: { 
+                        legend: { labels: { color: '#f3f4f6' } },
+                        tooltip: {
+                            callbacks: {
+                                footer: function(context) {
+                                    const idx = context[0].dataIndex;
+                                    const frameObj = activeFrameCache[idx];
+                                    if(frameObj && frameObj.triggered_event && frameObj.triggered_event !== "None") {
+                                        return `⚡ OS Event: ${frameObj.triggered_event}`;
+                                    }
+                                    return null;
+                                }
+                            }
+                        }
+                    } 
+                }
+            });
+
+            resizeChartCanvas(frameChart, 'frameChartContainer');
+
+            const ctxB = document.getElementById('batteryChart').getContext('2d');
+            batteryChart = new Chart(ctxB, {
+                type: 'line',
+                data: { labels: battery.map(b => `${b.time_sec}s`), datasets: [
+                    { label: 'Battery Capacity (%)', data: battery.map(b => b.battery_level), borderColor: '#10b981', borderWidth: 2, pointRadius: 0, yAxisID: 'yLeft', tension: 0.1 },
+                    { label: 'Core Temperature (°C)', data: battery.map(b => b.temperature_c), borderColor: '#f97316', borderWidth: 2, pointRadius: 0, yAxisID: 'yRight', tension: 0.1 }
+                ]},
+                options: {
+                    responsive: true, maintainAspectRatio: false,
+                    scales: {
+                        x: { grid: { color: '#374151' }, ticks: { color: '#9ca3af', maxTicksLimit: 30 } },
+                        yLeft: { position: 'left', grid: { color: '#374151' }, ticks: { color: '#10b981' }, min:0, max:100 },
+                        yRight: { position: 'right', grid: { drawOnChartArea: false }, ticks: { color: '#f97316' }, suggestedMin:25, suggestedMax:45 }
+                    },
+                    plugins: { legend: { labels: { color: '#f3f4f6' } } }
+                }
+            });
+            
+            resizeChartCanvas(batteryChart, 'batteryChartContainer');
+        }
+
+        function triggerExcelDownload() { window.location.href = '/api/export/excel'; }
+        
+        // NEW EXPORT MD FUNCTION
+        function triggerMdDownload() { window.location.href = '/api/export/md'; }
+    </script>
+</body>
+</html>

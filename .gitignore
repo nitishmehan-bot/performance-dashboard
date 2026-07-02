@@ -216,3 +216,16 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Project-specific binary files
+*.apk
+
+# Generated reports & exports
+performance_report.json
+*_RCA_*.xlsx
+*_RCA_*.md
+*_Audit_*.md
+
+# macOS system files
+.DS_Store
+Thumbs.db
