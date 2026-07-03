@@ -83,16 +83,41 @@ adb devices
 
 ### 2. Start the Dashboard Server
 
+**Easiest (macOS/Linux):** use the run script, which sets up the virtual
+environment, installs dependencies, checks for `adb`/devices, and starts the
+server with helpful logs:
+
+```bash
+./run.sh
+```
+
+**Manual:**
+
 ```bash
 source venv/bin/activate  # On Windows: venv\Scripts\activate
 python server.py
 ```
 
-The server will start on `http://127.0.0.1:5000`
+The server **automatically finds a free port** (it prefers `8000`, but if that
+is busy it picks another). Watch the console — it prints the exact URL, e.g.:
+
+```
+============================================================
+  Performance Observability Lab
+  Server running at: http://127.0.0.1:8000
+  Press CTRL+C to stop
+============================================================
+```
+
+To force a specific port, set the `PORT` environment variable:
+
+```bash
+PORT=8080 ./run.sh        # or: PORT=8080 python server.py
+```
 
 ### 3. Open Dashboard in Browser
 
-Navigate to **http://localhost:5000** in your web browser
+Navigate to the URL printed in the console (e.g. **http://127.0.0.1:8000**).
 
 ### 4. Upload & Start Test
 
@@ -234,15 +259,19 @@ pip install --upgrade pip
 pip install -r requirements.txt
 ```
 
-### Port 5000 already in use
+### Port already in use
+The server auto-selects a free port, so this is rarely an issue. If you want a
+specific port, set the `PORT` environment variable:
+
 ```bash
-# Find process using port 5000
-lsof -i :5000
+PORT=8080 ./run.sh        # or: PORT=8080 python server.py
+```
 
-# Kill the process
+To see what is occupying a given port:
+
+```bash
+lsof -i :8000
 kill -9 <PID>
-
-# Or use a different port by editing server.py (line ~466)
 ```
 
 ## Technologies Used

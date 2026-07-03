@@ -8,6 +8,7 @@ import websockets
 import threading
 import os
 import io
+import socket
 import openpyxl
 from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
 from openpyxl.chart import LineChart, Reference
@@ -463,5 +464,40 @@ def export_md():
         download_name=f"HEXA_Perf_Audit_{time.strftime('%Y%m%d_%H%M%S')}.md"
     )
 
+def find_free_port(preferred=None):
+    """Return a usable TCP port.
+
+    Tries the preferred port first (env PORT or the passed value); if it is
+    taken or unspecified, asks the OS for any free port by binding to port 0.
+    """
+    candidates = []
+    env_port = os.environ.get("PORT")
+    if env_port and env_port.isdigit():
+        candidates.append(int(env_port))
+    if preferred:
+        candidates.append(preferred)
+
+    for port in candidates:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            try:
+                s.bind(("127.0.0.1", port))
+                return port
+            except OSError:
+                print(f"[PORT] {port} is busy, searching for a free port...")
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
 if __name__ == '__main__':
-    app.run(port=5000, debug=True)
+    port = find_free_port(preferred=8000)
+    print("=" * 60)
+    print("  Performance Observability Lab")
+    print(f"  Server running at: http://127.0.0.1:{port}")
+    print("  Press CTRL+C to stop")
+    print("=" * 60, flush=True)
+    # use_reloader=False so the auto-selected port stays stable
+    # (the reloader would re-run this file and could pick a different port).
+    app.run(host="127.0.0.1", port=port, debug=True, use_reloader=False)

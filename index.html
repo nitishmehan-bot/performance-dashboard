@@ -51,19 +51,26 @@
 
         <div class="bg-gray-800 border border-gray-700 rounded-xl p-6 shadow-lg mb-8">
             <h3 class="text-md font-semibold text-gray-300 mb-4 uppercase tracking-wider">Frame Rendering Latency & Event Diagnostics</h3>
-            <div id="frameScrollWrapper" class="w-full overflow-x-auto overflow-y-hidden custom-scrollbar pb-3">
-                <div id="frameChartContainer" class="relative h-[320px]" style="min-width: 100%;">
-                    <canvas id="telemetryChart"></canvas>
+            <div class="relative">
+                <div id="frameScrollWrapper" class="w-full overflow-x-auto overflow-y-hidden custom-scrollbar pb-3">
+                    <div id="frameChartContainer" class="relative h-[320px]" style="min-width: 100%;">
+                        <canvas id="telemetryChart"></canvas>
+                    </div>
                 </div>
+                <canvas id="telemetryChartYAxis" class="absolute top-0 left-0 pointer-events-none z-10" style="display:none;"></canvas>
             </div>
         </div>
 
         <div class="bg-gray-800 border border-gray-700 rounded-xl p-6 shadow-lg mb-8">
             <h3 class="text-md font-semibold text-gray-300 mb-4 uppercase tracking-wider">Hardware Power & Thermals Tracking</h3>
-            <div id="batteryScrollWrapper" class="w-full overflow-x-auto overflow-y-hidden custom-scrollbar pb-3">
-                <div id="batteryChartContainer" class="relative h-[240px]" style="min-width: 100%;">
-                    <canvas id="batteryChart"></canvas>
+            <div class="relative">
+                <div id="batteryScrollWrapper" class="w-full overflow-x-auto overflow-y-hidden custom-scrollbar pb-3">
+                    <div id="batteryChartContainer" class="relative h-[240px]" style="min-width: 100%;">
+                        <canvas id="batteryChart"></canvas>
+                    </div>
                 </div>
+                <canvas id="batteryChartYAxis" class="absolute top-0 left-0 pointer-events-none z-10" style="display:none;"></canvas>
+                <canvas id="batteryChartYAxisRight" class="absolute top-0 right-0 pointer-events-none z-10" style="display:none;"></canvas>
             </div>
         </div>
     </div>
@@ -92,6 +99,65 @@
             }
         };
 
+        const crosshairPlugin = {
+            id: 'hoverCrosshair',
+            afterDraw: function(chart) {
+                const active = chart.tooltip && chart.tooltip.getActiveElements ? chart.tooltip.getActiveElements() : [];
+                if (!active || active.length === 0) return;
+                const x = active[0].element.x;
+                const ctx = chart.ctx;
+                const top = chart.chartArea.top;
+                const bottom = chart.chartArea.bottom;
+                ctx.save();
+                ctx.beginPath();
+                ctx.moveTo(x, top); ctx.lineTo(x, bottom);
+                ctx.lineWidth = 1; ctx.strokeStyle = 'rgba(148, 163, 184, 0.6)'; ctx.setLineDash([4, 4]);
+                ctx.stroke();
+                ctx.restore();
+            }
+        };
+
+        // Copies a vertical strip of the chart canvas onto a pinned overlay canvas,
+        // so the y-axis stays fixed on screen while the chart scrolls horizontally.
+        function paintAxisStrip(srcCanvas, overlay, sxDevice, wDevice, hDevice, cssW, cssH) {
+            if (!overlay || wDevice <= 0 || hDevice <= 0) return;
+            if (overlay.width !== wDevice) overlay.width = wDevice;
+            if (overlay.height !== hDevice) overlay.height = hDevice;
+            overlay.style.width = cssW + 'px';
+            overlay.style.height = cssH + 'px';
+            overlay.style.display = 'block';
+            const octx = overlay.getContext('2d');
+            octx.clearRect(0, 0, wDevice, hDevice);
+            octx.fillStyle = '#1f2937'; // match card background so scrolled data is hidden
+            octx.fillRect(0, 0, wDevice, hDevice);
+            octx.drawImage(srcCanvas, sxDevice, 0, wDevice, hDevice, 0, 0, wDevice, hDevice);
+        }
+
+        const stickyYAxisPlugin = {
+            id: 'stickyYAxis',
+            afterDraw: function(chart) {
+                if (!chart.chartArea) return;
+                const dpr = window.devicePixelRatio || 1;
+                const src = chart.canvas;
+                const cssH = chart.height;
+                const hDev = Math.round(cssH * dpr);
+                const id = chart.canvas.id;
+
+                const leftOverlay = document.getElementById(id + 'YAxis');
+                if (leftOverlay) {
+                    const leftCssW = Math.ceil(chart.chartArea.left);
+                    paintAxisStrip(src, leftOverlay, 0, Math.round(leftCssW * dpr), hDev, leftCssW, cssH);
+                }
+
+                const rightOverlay = document.getElementById(id + 'YAxisRight');
+                if (rightOverlay) {
+                    const rightCssW = Math.ceil(chart.width - chart.chartArea.right);
+                    const sxDev = Math.floor(chart.chartArea.right * dpr);
+                    paintAxisStrip(src, rightOverlay, sxDev, Math.round(rightCssW * dpr), hDev, rightCssW, cssH);
+                }
+            }
+        };
+
         function updateFeedback(text, isError = false) {
             const el = document.getElementById('statusFeedback');
             el.className = `text-sm mt-4 font-medium ${isError ? 'text-rose-400' : 'text-emerald-400'}`;
@@ -101,10 +167,42 @@
         function resizeChartCanvas(chartObj, containerId) {
             if(!chartObj) return;
             const dataLength = chartObj.data.labels.length;
-            const requiredWidthPx = dataLength * 12; 
+            const requiredWidthPx = dataLength * 12;
             const container = document.getElementById(containerId);
             const parentWidth = container.parentElement.clientWidth;
-            container.style.minWidth = Math.max(parentWidth, requiredWidthPx) + 'px';
+
+            // Browsers cap a canvas at ~32767px per side. Chart.js multiplies the
+            // CSS width by devicePixelRatio for the backing store, so on HiDPI
+            // screens the real limit is 32767 / dpr. Exceeding it silently blanks
+            // the line datasets (only the threshold plugin line keeps drawing).
+            const dpr = window.devicePixelRatio || 1;
+            const maxCssWidth = Math.floor(32000 / dpr);
+            const safeWidthPx = Math.min(requiredWidthPx, maxCssWidth);
+
+            container.style.minWidth = Math.max(parentWidth, safeWidthPx) + 'px';
+        }
+
+        // Keeps the frame chart readable: the y-axis max tracks only the most
+        // recent frames, so a one-off spike inflates the scale briefly and then
+        // the axis recovers once that spike scrolls out of the recent window.
+        const RECENT_WINDOW = 250; // number of latest frames the y-axis reacts to
+        const Y_FLOOR = 20;        // never drop below this (keeps the 16.6ms line visible)
+        function rescaleFrameY(chart) {
+            const ds0 = chart.data.datasets[0].data;
+            const ds1 = chart.data.datasets[1].data;
+            const n = ds0.length;
+            if (n === 0) return;
+            const start = Math.max(0, n - RECENT_WINDOW);
+            let peak = 0;
+            for (let i = start; i < n; i++) {
+                if (ds0[i] > peak) peak = ds0[i];
+                if (ds1[i] > peak) peak = ds1[i];
+            }
+            let target = Math.max(Y_FLOOR, peak * 1.15); // 15% headroom above the recent peak
+            const step = target <= 30 ? 5 : (target <= 100 ? 10 : 25);
+            target = Math.ceil(target / step) * step;
+            chart.options.scales.y.min = 0;
+            chart.options.scales.y.max = target;
         }
 
         function initializeCharts() {
@@ -114,18 +212,22 @@
 
             const ctxFrame = document.getElementById('telemetryChart').getContext('2d');
             frameChart = new Chart(ctxFrame, {
-                type: 'line', plugins: [thresholdLinePlugin],
+                type: 'line', plugins: [thresholdLinePlugin, crosshairPlugin, stickyYAxisPlugin],
                 data: { labels: [], datasets: [
-                    { label: 'UI Thread (Dart)', data: [], borderColor: '#3b82f6', backgroundColor: 'rgba(59, 130, 246, 0.05)', borderWidth: 2, pointRadius: [], pointBackgroundColor: '#f43f5e', pointBorderColor: '#fff', pointBorderWidth: 2, fill: true, tension: 0.1 },
-                    { label: 'Raster Thread (GPU)', data: [], borderColor: '#a855f7', backgroundColor: 'rgba(168, 85, 247, 0.05)', borderWidth: 2, pointRadius: [], pointBackgroundColor: '#f43f5e', pointBorderColor: '#fff', pointBorderWidth: 2, fill: true, tension: 0.1 }
+                    { label: 'UI Thread (Dart)', data: [], borderColor: '#3b82f6', backgroundColor: 'rgba(59, 130, 246, 0.05)', borderWidth: 2, pointRadius: [], pointHoverRadius: 4, pointBackgroundColor: '#f43f5e', pointBorderColor: '#fff', pointBorderWidth: 2, fill: true, tension: 0.1 },
+                    { label: 'Raster Thread (GPU)', data: [], borderColor: '#a855f7', backgroundColor: 'rgba(168, 85, 247, 0.05)', borderWidth: 2, pointRadius: [], pointHoverRadius: 4, pointBackgroundColor: '#f43f5e', pointBorderColor: '#fff', pointBorderWidth: 2, fill: true, tension: 0.1 }
                 ]},
                 options: { 
                     responsive: true, maintainAspectRatio: false, animation: false, 
+                    interaction: { mode: 'index', intersect: false },
                     scales: { x: { grid: { color: '#374151' }, ticks: { color: '#9ca3af', maxTicksLimit: 20 } }, y: { grid: { color: '#374151' }, ticks: { color: '#9ca3af' }, suggestedMax: 20 } }, 
                     plugins: { 
                         legend: { labels: { color: '#f3f4f6' } },
                         tooltip: {
                             callbacks: {
+                                label: function(context) {
+                                    return `${context.dataset.label}: ${context.parsed.y} ms`;
+                                },
                                 footer: function(context) {
                                     const idx = context[0].dataIndex;
                                     const frameObj = activeFrameCache[idx];
@@ -142,13 +244,14 @@
 
             const ctxBattery = document.getElementById('batteryChart').getContext('2d');
             batteryChart = new Chart(ctxBattery, {
-                type: 'line',
+                type: 'line', plugins: [stickyYAxisPlugin],
                 data: { labels: [], datasets: [
-                    { label: 'Battery Capacity (%)', data: [], borderColor: '#10b981', borderWidth: 2, pointRadius: 0, yAxisID: 'yLeft', tension: 0.1 },
-                    { label: 'Core Temperature (°C)', data: [], borderColor: '#f97316', borderWidth: 2, pointRadius: 0, yAxisID: 'yRight', tension: 0.1 }
+                    { label: 'Battery Capacity (%)', data: [], borderColor: '#10b981', borderWidth: 2, pointRadius: 0, pointHoverRadius: 4, yAxisID: 'yLeft', tension: 0.1 },
+                    { label: 'Core Temperature (°C)', data: [], borderColor: '#f97316', borderWidth: 2, pointRadius: 0, pointHoverRadius: 4, yAxisID: 'yRight', tension: 0.1 }
                 ]},
                 options: {
                     responsive: true, maintainAspectRatio: false, animation: false,
+                    interaction: { mode: 'index', intersect: false },
                     scales: {
                         x: { grid: { color: '#374151' }, ticks: { color: '#9ca3af', maxTicksLimit: 20 } },
                         yLeft: { position: 'left', grid: { color: '#374151' }, ticks: { color: '#10b981' }, min: 0, max: 100 },
@@ -216,6 +319,7 @@
                     }
                     
                     resizeChartCanvas(frameChart, 'frameChartContainer');
+                    rescaleFrameY(frameChart);
                     frameChart.update();
                     
                     const fw = document.getElementById('frameScrollWrapper');
@@ -276,18 +380,22 @@
 
             const ctxF = document.getElementById('telemetryChart').getContext('2d');
             frameChart = new Chart(ctxF, {
-                type: 'line', plugins: [thresholdLinePlugin],
+                type: 'line', plugins: [thresholdLinePlugin, crosshairPlugin, stickyYAxisPlugin],
                 data: { labels: frames.map(f => `F-${f.frame_id}`), datasets: [
-                    { label: 'UI Thread (Dart)', data: frames.map(f => f.ui_time_ms), borderColor: '#3b82f6', backgroundColor: 'rgba(59, 130, 246, 0.05)', borderWidth: 2, pointRadius: frames.map(f => (f.triggered_event && f.triggered_event !== "None") ? 7 : 0), pointBackgroundColor: '#f43f5e', pointBorderColor: '#fff', pointBorderWidth: 2, fill: true, tension: 0.1 },
-                    { label: 'Raster Thread (GPU)', data: frames.map(f => f.raster_time_ms), borderColor: '#a855f7', backgroundColor: 'rgba(168, 85, 247, 0.05)', borderWidth: 2, pointRadius: frames.map(f => (f.triggered_event && f.triggered_event !== "None") ? 7 : 0), pointBackgroundColor: '#f43f5e', pointBorderColor: '#fff', pointBorderWidth: 2, fill: true, tension: 0.1 }
+                    { label: 'UI Thread (Dart)', data: frames.map(f => f.ui_time_ms), borderColor: '#3b82f6', backgroundColor: 'rgba(59, 130, 246, 0.05)', borderWidth: 2, pointRadius: frames.map(f => (f.triggered_event && f.triggered_event !== "None") ? 7 : 0), pointHoverRadius: 4, pointBackgroundColor: '#f43f5e', pointBorderColor: '#fff', pointBorderWidth: 2, fill: true, tension: 0.1 },
+                    { label: 'Raster Thread (GPU)', data: frames.map(f => f.raster_time_ms), borderColor: '#a855f7', backgroundColor: 'rgba(168, 85, 247, 0.05)', borderWidth: 2, pointRadius: frames.map(f => (f.triggered_event && f.triggered_event !== "None") ? 7 : 0), pointHoverRadius: 4, pointBackgroundColor: '#f43f5e', pointBorderColor: '#fff', pointBorderWidth: 2, fill: true, tension: 0.1 }
                 ]},
                 options: { 
                     responsive: true, maintainAspectRatio: false, 
+                    interaction: { mode: 'index', intersect: false },
                     scales: { x: { grid: { color: '#374151' }, ticks: { color: '#9ca3af', maxTicksLimit: 30 } }, y: { grid: { color: '#374151' }, ticks: { color: '#9ca3af' }, suggestedMax: 20 } }, 
                     plugins: { 
                         legend: { labels: { color: '#f3f4f6' } },
                         tooltip: {
                             callbacks: {
+                                label: function(context) {
+                                    return `${context.dataset.label}: ${context.parsed.y} ms`;
+                                },
                                 footer: function(context) {
                                     const idx = context[0].dataIndex;
                                     const frameObj = activeFrameCache[idx];
@@ -306,13 +414,14 @@
 
             const ctxB = document.getElementById('batteryChart').getContext('2d');
             batteryChart = new Chart(ctxB, {
-                type: 'line',
+                type: 'line', plugins: [stickyYAxisPlugin],
                 data: { labels: battery.map(b => `${b.time_sec}s`), datasets: [
-                    { label: 'Battery Capacity (%)', data: battery.map(b => b.battery_level), borderColor: '#10b981', borderWidth: 2, pointRadius: 0, yAxisID: 'yLeft', tension: 0.1 },
-                    { label: 'Core Temperature (°C)', data: battery.map(b => b.temperature_c), borderColor: '#f97316', borderWidth: 2, pointRadius: 0, yAxisID: 'yRight', tension: 0.1 }
+                    { label: 'Battery Capacity (%)', data: battery.map(b => b.battery_level), borderColor: '#10b981', borderWidth: 2, pointRadius: 0, pointHoverRadius: 4, yAxisID: 'yLeft', tension: 0.1 },
+                    { label: 'Core Temperature (°C)', data: battery.map(b => b.temperature_c), borderColor: '#f97316', borderWidth: 2, pointRadius: 0, pointHoverRadius: 4, yAxisID: 'yRight', tension: 0.1 }
                 ]},
                 options: {
                     responsive: true, maintainAspectRatio: false,
+                    interaction: { mode: 'index', intersect: false },
                     scales: {
                         x: { grid: { color: '#374151' }, ticks: { color: '#9ca3af', maxTicksLimit: 30 } },
                         yLeft: { position: 'left', grid: { color: '#374151' }, ticks: { color: '#10b981' }, min:0, max:100 },
