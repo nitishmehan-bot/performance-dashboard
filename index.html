@@ -50,7 +50,13 @@
         </div>
 
         <div class="bg-gray-800 border border-gray-700 rounded-xl p-6 shadow-lg mb-8">
-            <h3 class="text-md font-semibold text-gray-300 mb-4 uppercase tracking-wider">Frame Rendering Latency & Event Diagnostics</h3>
+            <div class="flex items-center justify-between mb-4">
+                <h3 class="text-md font-semibold text-gray-300 uppercase tracking-wider">Frame Rendering Latency & Event Diagnostics</h3>
+                <div class="flex gap-1 bg-gray-900 rounded-lg p-1">
+                    <button id="frameLineBtn" onclick="switchFrameChartType('line')" class="px-3 py-1 text-xs font-semibold rounded-md bg-emerald-600 text-white transition">Line</button>
+                    <button id="frameBarBtn" onclick="switchFrameChartType('bar')" class="px-3 py-1 text-xs font-semibold rounded-md text-gray-400 hover:text-white transition">Bar</button>
+                </div>
+            </div>
             <div class="relative">
                 <div id="frameScrollWrapper" class="w-full overflow-x-auto overflow-y-hidden custom-scrollbar pb-3">
                     <div id="frameChartContainer" class="relative h-[320px]" style="min-width: 100%;">
@@ -62,7 +68,13 @@
         </div>
 
         <div class="bg-gray-800 border border-gray-700 rounded-xl p-6 shadow-lg mb-8">
-            <h3 class="text-md font-semibold text-gray-300 mb-4 uppercase tracking-wider">Hardware Power & Thermals Tracking</h3>
+            <div class="flex items-center justify-between mb-4">
+                <h3 class="text-md font-semibold text-gray-300 uppercase tracking-wider">Hardware Power & Thermals Tracking</h3>
+                <div class="flex gap-1 bg-gray-900 rounded-lg p-1">
+                    <button id="batteryLineBtn" onclick="switchBatteryChartType('line')" class="px-3 py-1 text-xs font-semibold rounded-md bg-emerald-600 text-white transition">Line</button>
+                    <button id="batteryBarBtn" onclick="switchBatteryChartType('bar')" class="px-3 py-1 text-xs font-semibold rounded-md text-gray-400 hover:text-white transition">Bar</button>
+                </div>
+            </div>
             <div class="relative">
                 <div id="batteryScrollWrapper" class="w-full overflow-x-auto overflow-y-hidden custom-scrollbar pb-3">
                     <div id="batteryChartContainer" class="relative h-[240px]" style="min-width: 100%;">
@@ -82,6 +94,8 @@
         let framePointer = 0;
         let batteryPointer = 0;
         let activeFrameCache = [];
+        let frameChartType = 'line';
+        let batteryChartType = 'line';
 
         const thresholdLinePlugin = {
             id: 'jankThresholdLine',
@@ -167,7 +181,9 @@
         function resizeChartCanvas(chartObj, containerId) {
             if(!chartObj) return;
             const dataLength = chartObj.data.labels.length;
-            const requiredWidthPx = dataLength * 12;
+            const isBar = chartObj.config.type === 'bar';
+            const pxPerPoint = isBar ? 50 : 12;
+            const requiredWidthPx = dataLength * pxPerPoint;
             const container = document.getElementById(containerId);
             const parentWidth = container.parentElement.clientWidth;
 
@@ -205,6 +221,137 @@
             chart.options.scales.y.max = target;
         }
 
+        function frameDatasetStyle(type) {
+            const isLine = type === 'line';
+            return [
+                { label: 'UI Thread (Dart)', data: [], borderColor: '#3b82f6',
+                  backgroundColor: isLine ? 'rgba(59, 130, 246, 0.05)' : 'rgba(59, 130, 246, 0.55)',
+                  borderWidth: isLine ? 2 : 1, pointRadius: [], pointHoverRadius: isLine ? 4 : 0,
+                  pointBackgroundColor: '#f43f5e', pointBorderColor: '#fff', pointBorderWidth: 2,
+                  fill: isLine, tension: isLine ? 0.1 : 0 },
+                { label: 'Raster Thread (GPU)', data: [], borderColor: '#a855f7',
+                  backgroundColor: isLine ? 'rgba(168, 85, 247, 0.05)' : 'rgba(168, 85, 247, 0.55)',
+                  borderWidth: isLine ? 2 : 1, pointRadius: [], pointHoverRadius: isLine ? 4 : 0,
+                  pointBackgroundColor: '#f43f5e', pointBorderColor: '#fff', pointBorderWidth: 2,
+                  fill: isLine, tension: isLine ? 0.1 : 0 }
+            ];
+        }
+
+        function batteryDatasetStyle(type) {
+            const isLine = type === 'line';
+            return [
+                { label: 'Battery Capacity (%)', data: [], borderColor: '#10b981',
+                  backgroundColor: isLine ? 'rgba(16, 185, 129, 0.05)' : 'rgba(16, 185, 129, 0.55)',
+                  borderWidth: isLine ? 2 : 1, pointRadius: 0, pointHoverRadius: isLine ? 4 : 0,
+                  yAxisID: 'yLeft', tension: isLine ? 0.1 : 0 },
+                { label: 'Core Temperature (°C)', data: [], borderColor: '#f97316',
+                  backgroundColor: isLine ? 'rgba(249, 115, 22, 0.05)' : 'rgba(249, 115, 22, 0.55)',
+                  borderWidth: isLine ? 2 : 1, pointRadius: 0, pointHoverRadius: isLine ? 4 : 0,
+                  yAxisID: 'yRight', tension: isLine ? 0.1 : 0 }
+            ];
+        }
+
+        function frameChartOptions() {
+            return {
+                responsive: true, maintainAspectRatio: false, animation: false,
+                interaction: { mode: 'index', intersect: false },
+                scales: { x: { grid: { color: '#374151' }, ticks: { color: '#9ca3af', maxTicksLimit: 20 } }, y: { grid: { color: '#374151' }, ticks: { color: '#9ca3af' }, suggestedMax: 20 } },
+                plugins: {
+                    legend: { labels: { color: '#f3f4f6' } },
+                    tooltip: {
+                        callbacks: {
+                            label: function(context) {
+                                return `${context.dataset.label}: ${context.parsed.y} ms`;
+                            },
+                            footer: function(context) {
+                                const idx = context[0].dataIndex;
+                                const frameObj = activeFrameCache[idx];
+                                if(frameObj && frameObj.triggered_event && frameObj.triggered_event !== "None") {
+                                    return `⚡ OS Event: ${frameObj.triggered_event}`;
+                                }
+                                return null;
+                            }
+                        }
+                    }
+                }
+            };
+        }
+
+        function batteryChartOptions() {
+            return {
+                responsive: true, maintainAspectRatio: false, animation: false,
+                interaction: { mode: 'index', intersect: false },
+                scales: {
+                    x: { grid: { color: '#374151' }, ticks: { color: '#9ca3af', maxTicksLimit: 20 } },
+                    yLeft: { position: 'left', grid: { color: '#374151' }, ticks: { color: '#10b981' }, min: 0, max: 100 },
+                    yRight: { position: 'right', grid: { drawOnChartArea: false }, ticks: { color: '#f97316' }, suggestedMin: 25, suggestedMax: 45 }
+                },
+                plugins: { legend: { labels: { color: '#f3f4f6' } } }
+            };
+        }
+
+        function updateToggleButtons(chartName, activeType) {
+            const lineBtn = document.getElementById(chartName + 'LineBtn');
+            const barBtn = document.getElementById(chartName + 'BarBtn');
+            const active = 'px-3 py-1 text-xs font-semibold rounded-md bg-emerald-600 text-white transition';
+            const inactive = 'px-3 py-1 text-xs font-semibold rounded-md text-gray-400 hover:text-white transition';
+            lineBtn.className = activeType === 'line' ? active : inactive;
+            barBtn.className = activeType === 'bar' ? active : inactive;
+        }
+
+        function switchFrameChartType(type) {
+            if (type === frameChartType) return;
+            frameChartType = type;
+            updateToggleButtons('frame', type);
+            if (!frameChart) return;
+
+            const labels = [...frameChart.data.labels];
+            const uiData = [...frameChart.data.datasets[0].data];
+            const rasterData = [...frameChart.data.datasets[1].data];
+            const uiPointRadius = frameChart.data.datasets[0].pointRadius ? [...frameChart.data.datasets[0].pointRadius] : [];
+            const rasterPointRadius = frameChart.data.datasets[1].pointRadius ? [...frameChart.data.datasets[1].pointRadius] : [];
+
+            frameChart.destroy();
+            const ctx = document.getElementById('telemetryChart').getContext('2d');
+            const ds = frameDatasetStyle(type);
+            ds[0].data = uiData; ds[0].pointRadius = uiPointRadius;
+            ds[1].data = rasterData; ds[1].pointRadius = rasterPointRadius;
+
+            frameChart = new Chart(ctx, {
+                type: type, plugins: [thresholdLinePlugin, crosshairPlugin, stickyYAxisPlugin],
+                data: { labels: labels, datasets: ds },
+                options: frameChartOptions()
+            });
+            rescaleFrameY(frameChart);
+            resizeChartCanvas(frameChart, 'frameChartContainer');
+            frameChart.update();
+        }
+
+        function switchBatteryChartType(type) {
+            if (type === batteryChartType) return;
+            batteryChartType = type;
+            updateToggleButtons('battery', type);
+            if (!batteryChart) return;
+
+            const labels = [...batteryChart.data.labels];
+            const battData = [...batteryChart.data.datasets[0].data];
+            const tempData = [...batteryChart.data.datasets[1].data];
+
+            batteryChart.destroy();
+            const ctx = document.getElementById('batteryChart').getContext('2d');
+            const ds = batteryDatasetStyle(type);
+            ds[0].data = battData;
+            ds[1].data = tempData;
+
+            batteryChart = new Chart(ctx, {
+                type: type, plugins: [stickyYAxisPlugin],
+                data: { labels: labels, datasets: ds },
+                options: batteryChartOptions()
+            });
+            resizeChartCanvas(batteryChart, 'batteryChartContainer');
+            batteryChart.update();
+        }
+
         function initializeCharts() {
             if (frameChart) { frameChart.destroy(); }
             if (batteryChart) { batteryChart.destroy(); }
@@ -212,53 +359,16 @@
 
             const ctxFrame = document.getElementById('telemetryChart').getContext('2d');
             frameChart = new Chart(ctxFrame, {
-                type: 'line', plugins: [thresholdLinePlugin, crosshairPlugin, stickyYAxisPlugin],
-                data: { labels: [], datasets: [
-                    { label: 'UI Thread (Dart)', data: [], borderColor: '#3b82f6', backgroundColor: 'rgba(59, 130, 246, 0.05)', borderWidth: 2, pointRadius: [], pointHoverRadius: 4, pointBackgroundColor: '#f43f5e', pointBorderColor: '#fff', pointBorderWidth: 2, fill: true, tension: 0.1 },
-                    { label: 'Raster Thread (GPU)', data: [], borderColor: '#a855f7', backgroundColor: 'rgba(168, 85, 247, 0.05)', borderWidth: 2, pointRadius: [], pointHoverRadius: 4, pointBackgroundColor: '#f43f5e', pointBorderColor: '#fff', pointBorderWidth: 2, fill: true, tension: 0.1 }
-                ]},
-                options: { 
-                    responsive: true, maintainAspectRatio: false, animation: false, 
-                    interaction: { mode: 'index', intersect: false },
-                    scales: { x: { grid: { color: '#374151' }, ticks: { color: '#9ca3af', maxTicksLimit: 20 } }, y: { grid: { color: '#374151' }, ticks: { color: '#9ca3af' }, suggestedMax: 20 } }, 
-                    plugins: { 
-                        legend: { labels: { color: '#f3f4f6' } },
-                        tooltip: {
-                            callbacks: {
-                                label: function(context) {
-                                    return `${context.dataset.label}: ${context.parsed.y} ms`;
-                                },
-                                footer: function(context) {
-                                    const idx = context[0].dataIndex;
-                                    const frameObj = activeFrameCache[idx];
-                                    if(frameObj && frameObj.triggered_event && frameObj.triggered_event !== "None") {
-                                        return `⚡ OS Event: ${frameObj.triggered_event}`;
-                                    }
-                                    return null;
-                                }
-                            }
-                        }
-                    } 
-                }
+                type: frameChartType, plugins: [thresholdLinePlugin, crosshairPlugin, stickyYAxisPlugin],
+                data: { labels: [], datasets: frameDatasetStyle(frameChartType) },
+                options: frameChartOptions()
             });
 
             const ctxBattery = document.getElementById('batteryChart').getContext('2d');
             batteryChart = new Chart(ctxBattery, {
-                type: 'line', plugins: [stickyYAxisPlugin],
-                data: { labels: [], datasets: [
-                    { label: 'Battery Capacity (%)', data: [], borderColor: '#10b981', borderWidth: 2, pointRadius: 0, pointHoverRadius: 4, yAxisID: 'yLeft', tension: 0.1 },
-                    { label: 'Core Temperature (°C)', data: [], borderColor: '#f97316', borderWidth: 2, pointRadius: 0, pointHoverRadius: 4, yAxisID: 'yRight', tension: 0.1 }
-                ]},
-                options: {
-                    responsive: true, maintainAspectRatio: false, animation: false,
-                    interaction: { mode: 'index', intersect: false },
-                    scales: {
-                        x: { grid: { color: '#374151' }, ticks: { color: '#9ca3af', maxTicksLimit: 20 } },
-                        yLeft: { position: 'left', grid: { color: '#374151' }, ticks: { color: '#10b981' }, min: 0, max: 100 },
-                        yRight: { position: 'right', grid: { drawOnChartArea: false }, ticks: { color: '#f97316' }, suggestedMin: 25, suggestedMax: 45 }
-                    },
-                    plugins: { legend: { labels: { color: '#f3f4f6' } } }
-                }
+                type: batteryChartType, plugins: [stickyYAxisPlugin],
+                data: { labels: [], datasets: batteryDatasetStyle(batteryChartType) },
+                options: batteryChartOptions()
             });
         }
 
@@ -379,58 +489,34 @@
             activeFrameCache = frames;
 
             const ctxF = document.getElementById('telemetryChart').getContext('2d');
-            frameChart = new Chart(ctxF, {
-                type: 'line', plugins: [thresholdLinePlugin, crosshairPlugin, stickyYAxisPlugin],
-                data: { labels: frames.map(f => `F-${f.frame_id}`), datasets: [
-                    { label: 'UI Thread (Dart)', data: frames.map(f => f.ui_time_ms), borderColor: '#3b82f6', backgroundColor: 'rgba(59, 130, 246, 0.05)', borderWidth: 2, pointRadius: frames.map(f => (f.triggered_event && f.triggered_event !== "None") ? 7 : 0), pointHoverRadius: 4, pointBackgroundColor: '#f43f5e', pointBorderColor: '#fff', pointBorderWidth: 2, fill: true, tension: 0.1 },
-                    { label: 'Raster Thread (GPU)', data: frames.map(f => f.raster_time_ms), borderColor: '#a855f7', backgroundColor: 'rgba(168, 85, 247, 0.05)', borderWidth: 2, pointRadius: frames.map(f => (f.triggered_event && f.triggered_event !== "None") ? 7 : 0), pointHoverRadius: 4, pointBackgroundColor: '#f43f5e', pointBorderColor: '#fff', pointBorderWidth: 2, fill: true, tension: 0.1 }
-                ]},
-                options: { 
-                    responsive: true, maintainAspectRatio: false, 
-                    interaction: { mode: 'index', intersect: false },
-                    scales: { x: { grid: { color: '#374151' }, ticks: { color: '#9ca3af', maxTicksLimit: 30 } }, y: { grid: { color: '#374151' }, ticks: { color: '#9ca3af' }, suggestedMax: 20 } }, 
-                    plugins: { 
-                        legend: { labels: { color: '#f3f4f6' } },
-                        tooltip: {
-                            callbacks: {
-                                label: function(context) {
-                                    return `${context.dataset.label}: ${context.parsed.y} ms`;
-                                },
-                                footer: function(context) {
-                                    const idx = context[0].dataIndex;
-                                    const frameObj = activeFrameCache[idx];
-                                    if(frameObj && frameObj.triggered_event && frameObj.triggered_event !== "None") {
-                                        return `⚡ OS Event: ${frameObj.triggered_event}`;
-                                    }
-                                    return null;
-                                }
-                            }
-                        }
-                    } 
-                }
-            });
+            const fds = frameDatasetStyle(frameChartType);
+            const eventDots = frames.map(f => (f.triggered_event && f.triggered_event !== "None") ? 7 : 0);
+            fds[0].data = frames.map(f => f.ui_time_ms); fds[0].pointRadius = eventDots;
+            fds[1].data = frames.map(f => f.raster_time_ms); fds[1].pointRadius = [...eventDots];
 
+            const fOpts = frameChartOptions();
+            fOpts.scales.x.ticks.maxTicksLimit = 30;
+
+            frameChart = new Chart(ctxF, {
+                type: frameChartType, plugins: [thresholdLinePlugin, crosshairPlugin, stickyYAxisPlugin],
+                data: { labels: frames.map(f => `F-${f.frame_id}`), datasets: fds },
+                options: fOpts
+            });
             resizeChartCanvas(frameChart, 'frameChartContainer');
 
             const ctxB = document.getElementById('batteryChart').getContext('2d');
+            const bds = batteryDatasetStyle(batteryChartType);
+            bds[0].data = battery.map(b => b.battery_level);
+            bds[1].data = battery.map(b => b.temperature_c);
+
+            const bOpts = batteryChartOptions();
+            bOpts.scales.x.ticks.maxTicksLimit = 30;
+
             batteryChart = new Chart(ctxB, {
-                type: 'line', plugins: [stickyYAxisPlugin],
-                data: { labels: battery.map(b => `${b.time_sec}s`), datasets: [
-                    { label: 'Battery Capacity (%)', data: battery.map(b => b.battery_level), borderColor: '#10b981', borderWidth: 2, pointRadius: 0, pointHoverRadius: 4, yAxisID: 'yLeft', tension: 0.1 },
-                    { label: 'Core Temperature (°C)', data: battery.map(b => b.temperature_c), borderColor: '#f97316', borderWidth: 2, pointRadius: 0, pointHoverRadius: 4, yAxisID: 'yRight', tension: 0.1 }
-                ]},
-                options: {
-                    responsive: true, maintainAspectRatio: false,
-                    interaction: { mode: 'index', intersect: false },
-                    scales: {
-                        x: { grid: { color: '#374151' }, ticks: { color: '#9ca3af', maxTicksLimit: 30 } },
-                        yLeft: { position: 'left', grid: { color: '#374151' }, ticks: { color: '#10b981' }, min:0, max:100 },
-                        yRight: { position: 'right', grid: { drawOnChartArea: false }, ticks: { color: '#f97316' }, suggestedMin:25, suggestedMax:45 }
-                    },
-                    plugins: { legend: { labels: { color: '#f3f4f6' } } }
-                }
+                type: batteryChartType, plugins: [stickyYAxisPlugin],
+                data: { labels: battery.map(b => `${b.time_sec}s`), datasets: bds },
+                options: bOpts
             });
-            
             resizeChartCanvas(batteryChart, 'batteryChartContainer');
         }
 
