@@ -2,6 +2,18 @@
 
 A real-time performance monitoring and analysis dashboard for Flutter applications running on Android devices. Track frame metrics, detect jank, monitor battery health, and generate detailed performance reports with AI-powered optimization suggestions.
 
+## 🚀 Quick Start (No Hassle)
+
+Want to get started immediately without reading instructions? Just run:
+
+```bash
+bash run.sh
+```
+
+The script handles everything — checks prerequisites, sets up the environment, installs dependencies, and starts the server. Watch the console for the dashboard URL.
+
+---
+
 ## Features
 
 - 🎯 **Real-time Frame Monitoring** - Capture UI thread and raster thread metrics in real-time
@@ -301,14 +313,6 @@ kill -9 <PID>
 - Test on a **consistent device** for accurate comparisons
 - Use **event markers** to correlate gameplay actions with performance
 - Export reports as **Excel** for visual analysis with charts
-
-## License
-
-MIT License - Feel free to use and modify for your projects.
-
-## Support
-
-For issues or feature requests, check the project repository or contact the maintainer.
 
 ---
 
