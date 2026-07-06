@@ -19,7 +19,9 @@ app = Flask(__name__, template_folder='.', static_folder='.', static_url_path=''
 UPLOAD_FOLDER = os.path.dirname(os.path.abspath(__file__))
 frame_history = []
 battery_history = []
+system_history = []
 tracking_active = False
+active_package_name = None
 loop = None
 
 latest_broadcast_event = "None"
@@ -57,7 +59,8 @@ async def stream_performance_data(ws_url):
                             "raster_time_ms": round(raw_raster / 1000.0, 2),
                             "total_time_ms": round((raw_ui + raw_raster) / 1000.0, 2),
                             "jank": ((raw_ui + raw_raster) / 1000.0) > 16.6,
-                            "triggered_event": latest_broadcast_event
+                            "triggered_event": latest_broadcast_event,
+                            "ts": time.time()
                         })
                         
                         latest_broadcast_event = "None"
@@ -103,6 +106,60 @@ def poll_battery_hardware():
             })
         time.sleep(1.0)
 
+def poll_system_stats():
+    global system_history, tracking_active, active_package_name
+    start_time = time.time()
+    pkg = active_package_name
+
+    target_pid = None
+    prev_ticks = None
+    prev_uptime = None
+    num_cores = 1
+
+    ok, nproc_out = run_command("adb shell nproc")
+    if ok and nproc_out.strip().isdigit():
+        num_cores = int(nproc_out.strip())
+
+    while tracking_active:
+        entry = {"time_sec": int(time.time() - start_time), "memory_mb": 0, "cpu_percent": 0}
+
+        success, output = run_command(f"adb shell dumpsys meminfo {pkg} -s")
+        if success:
+            total_pss = re.search(r'TOTAL\s+(\d+)', output)
+            if total_pss:
+                entry["memory_mb"] = round(int(total_pss.group(1)) / 1024.0, 1)
+
+        if target_pid is None:
+            ok, ps_out = run_command(f"adb shell ps -A")
+            if ok:
+                for line in ps_out.splitlines():
+                    if pkg in line:
+                        parts = line.split()
+                        if len(parts) >= 2 and parts[1].isdigit():
+                            target_pid = parts[1]
+                            break
+
+        if target_pid:
+            ok1, stat_out = run_command(f"adb shell cat /proc/{target_pid}/stat")
+            ok2, up_out = run_command("adb shell cat /proc/uptime")
+            if ok1 and ok2:
+                fields = stat_out.split()
+                if len(fields) >= 15:
+                    cur_ticks = int(fields[13]) + int(fields[14])
+                    cur_uptime = float(up_out.split()[0])
+
+                    if prev_ticks is not None and prev_uptime is not None:
+                        dt = cur_uptime - prev_uptime
+                        dticks = cur_ticks - prev_ticks
+                        if dt > 0:
+                            entry["cpu_percent"] = round((dticks / 100.0) / dt * 100 / num_cores, 1)
+
+                    prev_ticks = cur_ticks
+                    prev_uptime = cur_uptime
+
+        system_history.append(entry)
+        time.sleep(2.0)
+
 def run_async_loop(ws_url):
     global loop
     loop = asyncio.new_event_loop()
@@ -117,12 +174,13 @@ def home():
 
 @app.route('/api/start', methods=['POST'])
 def start_test():
-    global frame_history, battery_history, tracking_active, latest_broadcast_event
+    global frame_history, battery_history, system_history, tracking_active, latest_broadcast_event, active_package_name
     package_name = request.form.get('package_name')
     apk_file = request.files.get('apk')
     if not package_name or not apk_file: return jsonify({"success": False, "error": "Missing config properties."}), 400
 
-    frame_history, battery_history, latest_broadcast_event, tracking_active = [], [], "None", True
+    frame_history, battery_history, system_history, latest_broadcast_event, tracking_active = [], [], [], "None", True
+    active_package_name = package_name
     apk_path = os.path.join(UPLOAD_FOLDER, "temp-target-profile.apk")
     apk_file.save(apk_path)
 
@@ -157,19 +215,36 @@ def start_test():
     threading.Thread(target=run_async_loop, args=(ws_url,), daemon=True).start()
     threading.Thread(target=listen_for_android_broadcasts, daemon=True).start()
     threading.Thread(target=poll_battery_hardware, daemon=True).start()
+    threading.Thread(target=poll_system_stats, daemon=True).start()
     
     return jsonify({"success": True, "message": "All bulletproof layers connected live!"})
 
 @app.route('/api/live', methods=['GET'])
 def get_live_data():
-    global frame_history, battery_history, tracking_active
+    global frame_history, battery_history, system_history, tracking_active
     frame_idx = int(request.args.get('frame_start', 0))
     battery_idx = int(request.args.get('battery_start', 0))
-    return jsonify({ "active": tracking_active, "new_frames": frame_history[frame_idx:], "new_battery": battery_history[battery_idx:] })
+    system_idx = int(request.args.get('system_start', 0))
+
+    recent_count = min(120, len(frame_history))
+    if recent_count >= 2:
+        recent = frame_history[-recent_count:]
+        elapsed = recent[-1]["ts"] - recent[0]["ts"]
+        fps = round((recent_count - 1) / elapsed, 1) if elapsed > 0 else 0
+    else:
+        fps = 0
+
+    return jsonify({
+        "active": tracking_active,
+        "new_frames": frame_history[frame_idx:],
+        "new_battery": battery_history[battery_idx:],
+        "new_system": system_history[system_idx:],
+        "fps": fps
+    })
 
 @app.route('/api/stop', methods=['POST'])
 def stop_test():
-    global tracking_active, frame_history, battery_history
+    global tracking_active, frame_history, battery_history, system_history
     tracking_active = False
     
     if not frame_history: return jsonify({"success": False, "error": "No data captured."})
@@ -177,6 +252,11 @@ def stop_test():
     total_frames = len(frame_history)
     janky_frames = sum(1 for f in frame_history if f["jank"])
     jank_percentage = (janky_frames / total_frames) * 100 if total_frames > 0 else 0
+
+    avg_mem = round(sum(s["memory_mb"] for s in system_history) / len(system_history), 1) if system_history else 0
+    peak_mem = max((s["memory_mb"] for s in system_history), default=0)
+    avg_cpu = round(sum(s["cpu_percent"] for s in system_history) / len(system_history), 1) if system_history else 0
+    peak_cpu = max((s["cpu_percent"] for s in system_history), default=0)
 
     report = {
         "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
@@ -186,10 +266,15 @@ def stop_test():
             "jank_percentage": round(jank_percentage, 2),
             "average_ui_time_ms": round(sum(f["ui_time_ms"] for f in frame_history) / total_frames, 2),
             "average_raster_time_ms": round(sum(f["raster_time_ms"] for f in frame_history) / total_frames, 2),
-            "health_score": round(100 - jank_percentage, 1)
+            "health_score": round(100 - jank_percentage, 1),
+            "avg_memory_mb": avg_mem,
+            "peak_memory_mb": peak_mem,
+            "avg_cpu_percent": avg_cpu,
+            "peak_cpu_percent": peak_cpu
         },
         "frames": frame_history,
-        "battery": battery_history
+        "battery": battery_history,
+        "system": system_history
     }
     return jsonify({"success": True, "report": report})
 
@@ -203,9 +288,14 @@ def calculate_action_spans():
         if evt and evt != "None":
             if last_evt:
                 span_frames = frame_history[last_idx:idx+1]
+                total_in_span = len(span_frames)
                 max_ui = max((sf["ui_time_ms"] for sf in span_frames), default=0)
                 max_raster = max((sf["raster_time_ms"] for sf in span_frames), default=0)
                 
+                janky_in_span = sum(1 for sf in span_frames if sf["jank"])
+                jank_ratio = round((janky_in_span / total_in_span) * 100, 1) if total_in_span > 0 else 0
+                span_health = round(100 - jank_ratio, 1)
+
                 status = "✅ OK"
                 if max_ui > 16.6 or max_raster > 16.6: status = "⚠️ JANK IN SPAN"
                 if max_ui > 32.0 or max_raster > 32.0: status = "❌ SEVERE JANK"
@@ -215,7 +305,10 @@ def calculate_action_spans():
                     "end_event": evt,
                     "start_frame": frame_history[last_idx]["frame_id"],
                     "end_frame": f["frame_id"],
-                    "duration_frames": len(span_frames),
+                    "duration_frames": total_in_span,
+                    "janky_frames": janky_in_span,
+                    "jank_ratio": jank_ratio,
+                    "span_health": span_health,
                     "peak_ui": max_ui,
                     "peak_raster": max_raster,
                     "status": status
@@ -226,7 +319,7 @@ def calculate_action_spans():
 
 @app.route('/api/export/excel', methods=['GET'])
 def export_excel():
-    global frame_history, battery_history
+    global frame_history, battery_history, system_history
     if not frame_history: return jsonify({"success": False, "error": "No session history data"}), 400
 
     wb = openpyxl.Workbook()
@@ -238,6 +331,7 @@ def export_excel():
     ws_events = wb.create_sheet(title="Event RCA Diagnostics")
     ws_data = wb.create_sheet(title="Frame Logs")
     ws_batt = wb.create_sheet(title="Battery Logs")
+    ws_sys = wb.create_sheet(title="System Stats")
 
     PRIMARY_FILL = PatternFill(start_color="1F2937", end_color="1F2937", fill_type="solid")
     font_header = Font(name="Segoe UI", size=11, bold=True, color="FFFFFF")
@@ -258,14 +352,21 @@ def export_excel():
         ws_data.cell(row=idx, column=5, value=f.get("triggered_event", "None"))
 
     # 2. Breakpoint Spans
-    span_headers = ["Start Event", "End Event", "Start Frame", "End Frame", "Span Length (Frames)", "Peak UI (ms)", "Peak Raster (ms)", "Span Status"]
+    span_headers = [
+        "Start Event", "End Event", "Start Frame", "End Frame",
+        "Total Frames", "Janky Frames", "Jank Ratio (%)", "Span Health",
+        "Peak UI (ms)", "Peak Raster (ms)",
+        "Span Status"
+    ]
     for col_num, h in enumerate(span_headers, 1):
         c = ws_spans.cell(row=1, column=col_num, value=h)
         c.fill = PatternFill(start_color="8B5CF6", end_color="8B5CF6", fill_type="solid"); c.font = font_header
 
+    font_good = Font(name="Segoe UI", size=11, bold=True, color="10B981")
+
     spans = calculate_action_spans()
     if not spans:
-        ws_spans.merge_cells('A2:H2')
+        ws_spans.merge_cells('A2:K2')
         cell = ws_spans.cell(row=2, column=1, value="⚠️ No contiguous DreadTelemetry events were intercepted. AI Breakpoint Spans require at least two events.")
         cell.font = Font(italic=True, color="6B7280"); cell.alignment = Alignment(horizontal="center")
     else:
@@ -275,9 +376,19 @@ def export_excel():
             ws_spans.cell(row=idx, column=3, value=f"F-{sp['start_frame']}")
             ws_spans.cell(row=idx, column=4, value=f"F-{sp['end_frame']}")
             ws_spans.cell(row=idx, column=5, value=sp["duration_frames"])
-            ws_spans.cell(row=idx, column=6, value=sp["peak_ui"])
-            ws_spans.cell(row=idx, column=7, value=sp["peak_raster"])
-            c_stat = ws_spans.cell(row=idx, column=8, value=sp["status"])
+            ws_spans.cell(row=idx, column=6, value=sp["janky_frames"])
+
+            c_ratio = ws_spans.cell(row=idx, column=7, value=f"{sp['jank_ratio']}%")
+            if sp["jank_ratio"] > 10: c_ratio.font = font_alert
+
+            c_health = ws_spans.cell(row=idx, column=8, value=f"{sp['span_health']}/100")
+            if sp["span_health"] >= 90: c_health.font = font_good
+            elif sp["span_health"] < 80: c_health.font = font_alert
+
+            ws_spans.cell(row=idx, column=9, value=sp["peak_ui"])
+            ws_spans.cell(row=idx, column=10, value=sp["peak_raster"])
+
+            c_stat = ws_spans.cell(row=idx, column=11, value=sp["status"])
             if "JANK" in sp["status"]: c_stat.font = font_alert
 
     # 3. RCA Events
@@ -325,7 +436,22 @@ def export_excel():
         ws_batt.cell(row=idx, column=2, value=b["battery_level"])
         ws_batt.cell(row=idx, column=3, value=b["temperature_c"])
 
-    # 5. Dashboard Summary
+    # 5. System Stats Logs
+    sys_headers = ["Timeline (Seconds)", "Memory PSS (MB)", "CPU (%)"]
+    for col_num, h in enumerate(sys_headers, 1):
+        c = ws_sys.cell(row=1, column=col_num, value=h)
+        c.fill = PRIMARY_FILL; c.font = font_header
+
+    for idx, s in enumerate(system_history, 2):
+        ws_sys.cell(row=idx, column=1, value=f"{s['time_sec']}s")
+        ws_sys.cell(row=idx, column=2, value=s["memory_mb"])
+        ws_sys.cell(row=idx, column=3, value=s["cpu_percent"])
+
+    ws_sys.column_dimensions['A'].width = 20
+    ws_sys.column_dimensions['B'].width = 18
+    ws_sys.column_dimensions['C'].width = 12
+
+    # 6. Dashboard Summary
     ws_summary.cell(row=2, column=2, value="Enterprise Performance RCA Report").font = Font(name="Segoe UI", size=18, bold=True, color="10B981")
     
     total_frames = len(frame_history)
@@ -335,6 +461,11 @@ def export_excel():
     jank_pct = round((janky_frames / total_frames) * 100, 2) if total_frames > 0 else 0
     health = round(100 - jank_pct, 1)
 
+    avg_mem = round(sum(s["memory_mb"] for s in system_history) / len(system_history), 1) if system_history else 0
+    peak_mem = max((s["memory_mb"] for s in system_history), default=0)
+    avg_cpu = round(sum(s["cpu_percent"] for s in system_history) / len(system_history), 1) if system_history else 0
+    peak_cpu = max((s["cpu_percent"] for s in system_history), default=0)
+
     kpi_labels = ["SYSTEM HEALTH SCORE", "OVERALL JANK RATIO", "AVG UI THREAD", "AVG RASTER THREAD"]
     kpi_vals = [f"{health}/100", f"{jank_pct}%", f"{avg_ui}ms", f"{avg_raster}ms"]
     
@@ -343,6 +474,15 @@ def export_excel():
         c_lbl = ws_summary.cell(row=4, column=col, value=lbl)
         c_lbl.font = Font(name="Segoe UI", size=10, bold=True, color="6B7280"); c_lbl.fill = PatternFill(start_color="F3F4F6", end_color="F3F4F6", fill_type="solid")
         c_val = ws_summary.cell(row=5, column=col, value=val)
+        c_val.font = Font(name="Segoe UI", size=16, bold=True, color="1F2937"); c_val.fill = PatternFill(start_color="E5E7EB", end_color="E5E7EB", fill_type="solid")
+
+    kpi2_labels = ["AVG MEMORY (MB)", "PEAK MEMORY (MB)", "AVG CPU (%)", "PEAK CPU (%)"]
+    kpi2_vals = [f"{avg_mem}", f"{peak_mem}", f"{avg_cpu}%", f"{peak_cpu}%"]
+    for i, (lbl, val) in enumerate(zip(kpi2_labels, kpi2_vals)):
+        col = 2 + (i * 2)
+        c_lbl = ws_summary.cell(row=6, column=col, value=lbl)
+        c_lbl.font = Font(name="Segoe UI", size=10, bold=True, color="6B7280"); c_lbl.fill = PatternFill(start_color="F3F4F6", end_color="F3F4F6", fill_type="solid")
+        c_val = ws_summary.cell(row=7, column=col, value=val)
         c_val.font = Font(name="Segoe UI", size=16, bold=True, color="1F2937"); c_val.fill = PatternFill(start_color="E5E7EB", end_color="E5E7EB", fill_type="solid")
 
     dynamic_chart_width = max(25, int(total_frames * 0.10))
@@ -374,6 +514,20 @@ def export_excel():
         chart2.series[1].graphicalProperties.line.solidFill = "F97316"
         ws_summary.add_chart(chart2, "B31")
 
+    # System Stats Chart (Memory + CPU)
+    if system_history:
+        chart3 = LineChart()
+        chart3.title = "Memory & CPU Timeline"
+        chart3.width = dynamic_chart_width
+        chart3.height = 10
+        s_data_ref = Reference(ws_sys, min_col=2, min_row=1, max_col=3, max_row=len(system_history)+1)
+        s_cats_ref = Reference(ws_sys, min_col=1, min_row=2, max_row=len(system_history)+1)
+        chart3.add_data(s_data_ref, titles_from_data=True)
+        chart3.set_categories(s_cats_ref)
+        chart3.series[0].graphicalProperties.line.solidFill = "EF4444"
+        chart3.series[1].graphicalProperties.line.solidFill = "F59E0B"
+        ws_summary.add_chart(chart3, "B54")
+
     # Formatting Column Widths
     for col in ["B", "D", "F", "H"]: ws_summary.column_dimensions[col].width = 22
     ws_data.column_dimensions['A'].width = 15
@@ -381,6 +535,8 @@ def export_excel():
     ws_events.column_dimensions['B'].width = 35
     ws_spans.column_dimensions['A'].width = 30
     ws_spans.column_dimensions['B'].width = 30
+    ws_spans.column_dimensions['G'].width = 14
+    ws_spans.column_dimensions['H'].width = 14
     ws_batt.column_dimensions['A'].width = 20
 
     excel_stream = io.BytesIO()
@@ -392,7 +548,7 @@ def export_excel():
 
 @app.route('/api/export/md', methods=['GET'])
 def export_md():
-    global frame_history, battery_history
+    global frame_history, battery_history, system_history
     if not frame_history: return jsonify({"success": False, "error": "No session history data"}), 400
 
     total_frames = len(frame_history)
@@ -401,6 +557,11 @@ def export_md():
     avg_raster = round(sum(f["raster_time_ms"] for f in frame_history) / total_frames, 2) if total_frames > 0 else 0
     jank_pct = round((janky_frames / total_frames) * 100, 2) if total_frames > 0 else 0
     health = round(100 - jank_pct, 1)
+
+    avg_mem = round(sum(s["memory_mb"] for s in system_history) / len(system_history), 1) if system_history else 0
+    peak_mem = max((s["memory_mb"] for s in system_history), default=0)
+    avg_cpu = round(sum(s["cpu_percent"] for s in system_history) / len(system_history), 1) if system_history else 0
+    peak_cpu = max((s["cpu_percent"] for s in system_history), default=0)
 
     md = []
     md.append("# HEXA Performance Observability Lab - Executive AI Audit")
@@ -411,19 +572,22 @@ def export_md():
     md.append(f"- **Overall Jank Ratio:** {jank_pct}%")
     md.append(f"- **Total Frames Captured:** {total_frames}")
     md.append(f"- **Avg UI Thread:** {avg_ui} ms")
-    md.append(f"- **Avg Raster Thread:** {avg_raster} ms\n")
+    md.append(f"- **Avg Raster Thread:** {avg_raster} ms")
+    md.append(f"- **Avg Memory (PSS):** {avg_mem} MB  |  **Peak:** {peak_mem} MB")
+    md.append(f"- **Avg CPU:** {avg_cpu}%  |  **Peak:** {peak_cpu}%\n")
 
     md.append("## 2. Contextual Action Spans (AI Breakpoint Analysis)")
     md.append("This table tracks execution latency *between* two marked events.\n")
-    md.append("| Start Action (Breakpoint A) | End Action (Breakpoint B) | Peak UI (CPU) | Peak Raster (GPU) | Span Health |")
-    md.append("|---|---|---|---|---|")
+    md.append("| Breakpoint A → B | Frames | Janky | Jank% | Health | Peak UI | Peak Raster | Status |")
+    md.append("|---|---|---|---|---|---|---|---|")
     
     spans = calculate_action_spans()
     if not spans:
-        md.append("| N/A | N/A | - | - | No contiguous events found |")
+        md.append("| N/A | - | - | - | - | - | - | No events found |")
     else:
         for sp in spans:
-            md.append(f"| `{sp['start_event']}` | `{sp['end_event']}` | {sp['peak_ui']}ms | {sp['peak_raster']}ms | {sp['status']} |")
+            label = f"`{sp['start_event']}` → `{sp['end_event']}`"
+            md.append(f"| {label} | {sp['duration_frames']} | {sp['janky_frames']} | {sp['jank_ratio']}% | {sp['span_health']}/100 | {sp['peak_ui']}ms | {sp['peak_raster']}ms | {sp['status']} |")
     md.append("\n")
 
     md.append("---\n## 🎯 Targeted AI Refactor Commands (Copy & Paste to Cursor)")

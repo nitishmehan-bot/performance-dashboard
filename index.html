@@ -42,11 +42,12 @@
             <p id="statusFeedback" class="text-sm mt-4 text-gray-400 hidden font-medium"></p>
         </div>
 
-        <div id="metricsMatrix" class="grid grid-cols-1 md:grid-cols-4 gap-6 mb-8 opacity-40 transition-opacity duration-300">
-            <div class="bg-gray-800 border border-gray-700 rounded-xl p-6 shadow-lg"><p class="text-sm font-semibold uppercase tracking-wider text-gray-400">System Health Score</p><p id="health-score" class="text-4xl font-extrabold mt-2 text-emerald-400">--</p></div>
-            <div class="bg-gray-800 border border-gray-700 rounded-xl p-6 shadow-lg"><p class="text-sm font-semibold uppercase tracking-wider text-gray-400">Overall Jank Ratio</p><p id="jank-percentage" class="text-4xl font-extrabold mt-2 text-amber-400">--</p></div>
-            <div class="bg-gray-800 border border-gray-700 rounded-xl p-6 shadow-lg"><p class="text-sm font-semibold uppercase tracking-wider text-gray-400">Avg UI Thread Time</p><p id="avg-ui" class="text-4xl font-extrabold mt-2 text-blue-400">--</p></div>
-            <div class="bg-gray-800 border border-gray-700 rounded-xl p-6 shadow-lg"><p class="text-sm font-semibold uppercase tracking-wider text-gray-400">Avg Raster Thread Time</p><p id="avg-raster" class="text-4xl font-extrabold mt-2 text-purple-400">--</p></div>
+        <div id="metricsMatrix" class="grid grid-cols-1 md:grid-cols-5 gap-4 mb-8 opacity-40 transition-opacity duration-300">
+            <div class="bg-gray-800 border border-gray-700 rounded-xl p-5 shadow-lg"><p class="text-xs font-semibold uppercase tracking-wider text-gray-400">System Health</p><p id="health-score" class="text-3xl font-extrabold mt-1 text-emerald-400">--</p></div>
+            <div class="bg-gray-800 border border-gray-700 rounded-xl p-5 shadow-lg"><p class="text-xs font-semibold uppercase tracking-wider text-gray-400">Jank Ratio</p><p id="jank-percentage" class="text-3xl font-extrabold mt-1 text-amber-400">--</p></div>
+            <div class="bg-gray-800 border border-gray-700 rounded-xl p-5 shadow-lg"><p class="text-xs font-semibold uppercase tracking-wider text-gray-400">FPS</p><p id="fps-counter" class="text-3xl font-extrabold mt-1 text-cyan-400">--</p></div>
+            <div class="bg-gray-800 border border-gray-700 rounded-xl p-5 shadow-lg"><p class="text-xs font-semibold uppercase tracking-wider text-gray-400">Memory (PSS)</p><p id="memory-counter" class="text-3xl font-extrabold mt-1 text-red-400">--</p></div>
+            <div class="bg-gray-800 border border-gray-700 rounded-xl p-5 shadow-lg"><p class="text-xs font-semibold uppercase tracking-wider text-gray-400">CPU</p><p id="cpu-counter" class="text-3xl font-extrabold mt-1 text-yellow-400">--</p></div>
         </div>
 
         <div class="bg-gray-800 border border-gray-700 rounded-xl p-6 shadow-lg mb-8">
@@ -85,17 +86,39 @@
                 <canvas id="batteryChartYAxisRight" class="absolute top-0 right-0 pointer-events-none z-10" style="display:none;"></canvas>
             </div>
         </div>
+
+        <div class="bg-gray-800 border border-gray-700 rounded-xl p-6 shadow-lg mb-8">
+            <div class="flex items-center justify-between mb-4">
+                <h3 class="text-md font-semibold text-gray-300 uppercase tracking-wider">Memory & CPU Usage</h3>
+                <div class="flex gap-1 bg-gray-900 rounded-lg p-1">
+                    <button id="systemLineBtn" onclick="switchSystemChartType('line')" class="px-3 py-1 text-xs font-semibold rounded-md bg-emerald-600 text-white transition">Line</button>
+                    <button id="systemBarBtn" onclick="switchSystemChartType('bar')" class="px-3 py-1 text-xs font-semibold rounded-md text-gray-400 hover:text-white transition">Bar</button>
+                </div>
+            </div>
+            <div class="relative">
+                <div id="systemScrollWrapper" class="w-full overflow-x-auto overflow-y-hidden custom-scrollbar pb-3">
+                    <div id="systemChartContainer" class="relative h-[240px]" style="min-width: 100%;">
+                        <canvas id="systemChart"></canvas>
+                    </div>
+                </div>
+                <canvas id="systemChartYAxis" class="absolute top-0 left-0 pointer-events-none z-10" style="display:none;"></canvas>
+                <canvas id="systemChartYAxisRight" class="absolute top-0 right-0 pointer-events-none z-10" style="display:none;"></canvas>
+            </div>
+        </div>
     </div>
 
     <script>
         let frameChart = null;
         let batteryChart = null;
+        let systemChart = null;
         let liveInterval = null;
         let framePointer = 0;
         let batteryPointer = 0;
+        let systemPointer = 0;
         let activeFrameCache = [];
         let frameChartType = 'line';
         let batteryChartType = 'line';
+        let systemChartType = 'line';
 
         const thresholdLinePlugin = {
             id: 'jankThresholdLine',
@@ -290,6 +313,64 @@
             };
         }
 
+        function systemDatasetStyle(type) {
+            const isLine = type === 'line';
+            return [
+                { label: 'Memory PSS (MB)', data: [], borderColor: '#ef4444',
+                  backgroundColor: isLine ? 'rgba(239, 68, 68, 0.05)' : 'rgba(239, 68, 68, 0.55)',
+                  borderWidth: isLine ? 2 : 1, pointRadius: 0, pointHoverRadius: isLine ? 4 : 0,
+                  yAxisID: 'yLeft', tension: isLine ? 0.1 : 0 },
+                { label: 'CPU (%)', data: [], borderColor: '#f59e0b',
+                  backgroundColor: isLine ? 'rgba(245, 158, 11, 0.05)' : 'rgba(245, 158, 11, 0.55)',
+                  borderWidth: isLine ? 2 : 1, pointRadius: 0, pointHoverRadius: isLine ? 4 : 0,
+                  yAxisID: 'yRight', tension: isLine ? 0.1 : 0 }
+            ];
+        }
+
+        function systemChartOptions() {
+            return {
+                responsive: true, maintainAspectRatio: false, animation: false,
+                interaction: { mode: 'index', intersect: false },
+                scales: {
+                    x: { grid: { color: '#374151' }, ticks: { color: '#9ca3af', maxTicksLimit: 20 } },
+                    yLeft: { position: 'left', grid: { color: '#374151' }, ticks: { color: '#ef4444' }, min: 0, title: { display: true, text: 'MB', color: '#ef4444' } },
+                    yRight: { position: 'right', grid: { drawOnChartArea: false }, ticks: { color: '#f59e0b' }, min: 0, max: 100, title: { display: true, text: '%', color: '#f59e0b' } }
+                },
+                plugins: {
+                    legend: { labels: { color: '#f3f4f6' } },
+                    tooltip: { callbacks: { label: function(ctx) {
+                        const unit = ctx.datasetIndex === 0 ? ' MB' : '%';
+                        return `${ctx.dataset.label}: ${ctx.parsed.y}${unit}`;
+                    }}}
+                }
+            };
+        }
+
+        function switchSystemChartType(type) {
+            if (type === systemChartType) return;
+            systemChartType = type;
+            updateToggleButtons('system', type);
+            if (!systemChart) return;
+
+            const labels = [...systemChart.data.labels];
+            const memData = [...systemChart.data.datasets[0].data];
+            const cpuData = [...systemChart.data.datasets[1].data];
+
+            systemChart.destroy();
+            const ctx = document.getElementById('systemChart').getContext('2d');
+            const ds = systemDatasetStyle(type);
+            ds[0].data = memData;
+            ds[1].data = cpuData;
+
+            systemChart = new Chart(ctx, {
+                type: type, plugins: [stickyYAxisPlugin],
+                data: { labels: labels, datasets: ds },
+                options: systemChartOptions()
+            });
+            resizeChartCanvas(systemChart, 'systemChartContainer');
+            systemChart.update();
+        }
+
         function updateToggleButtons(chartName, activeType) {
             const lineBtn = document.getElementById(chartName + 'LineBtn');
             const barBtn = document.getElementById(chartName + 'BarBtn');
@@ -355,7 +436,8 @@
         function initializeCharts() {
             if (frameChart) { frameChart.destroy(); }
             if (batteryChart) { batteryChart.destroy(); }
-            framePointer = 0; batteryPointer = 0; activeFrameCache = [];
+            if (systemChart) { systemChart.destroy(); }
+            framePointer = 0; batteryPointer = 0; systemPointer = 0; activeFrameCache = [];
 
             const ctxFrame = document.getElementById('telemetryChart').getContext('2d');
             frameChart = new Chart(ctxFrame, {
@@ -369,6 +451,13 @@
                 type: batteryChartType, plugins: [stickyYAxisPlugin],
                 data: { labels: [], datasets: batteryDatasetStyle(batteryChartType) },
                 options: batteryChartOptions()
+            });
+
+            const ctxSystem = document.getElementById('systemChart').getContext('2d');
+            systemChart = new Chart(ctxSystem, {
+                type: systemChartType, plugins: [stickyYAxisPlugin],
+                data: { labels: [], datasets: systemDatasetStyle(systemChartType) },
+                options: systemChartOptions()
             });
         }
 
@@ -401,8 +490,13 @@
 
         async function pollLiveTelemetry() {
             try {
-                const res = await fetch(`/api/live?frame_start=${framePointer}&battery_start=${batteryPointer}`);
+                const res = await fetch(`/api/live?frame_start=${framePointer}&battery_start=${batteryPointer}&system_start=${systemPointer}`);
                 const data = await res.json();
+
+                if (data.fps !== undefined && data.fps > 0) {
+                    document.getElementById('fps-counter').textContent = `${data.fps}`;
+                    document.getElementById('metricsMatrix').classList.remove('opacity-40');
+                }
 
                 if (data.new_frames && data.new_frames.length > 0) {
                     data.new_frames.forEach(f => {
@@ -450,6 +544,25 @@
                     const bw = document.getElementById('batteryScrollWrapper');
                     bw.scrollLeft = bw.scrollWidth;
                 }
+
+                if (data.new_system && data.new_system.length > 0) {
+                    data.new_system.forEach(s => {
+                        systemChart.data.labels.push(`${s.time_sec}s`);
+                        systemChart.data.datasets[0].data.push(s.memory_mb);
+                        systemChart.data.datasets[1].data.push(s.cpu_percent);
+                    });
+                    systemPointer += data.new_system.length;
+
+                    resizeChartCanvas(systemChart, 'systemChartContainer');
+                    systemChart.update();
+
+                    const sw = document.getElementById('systemScrollWrapper');
+                    sw.scrollLeft = sw.scrollWidth;
+
+                    const latest = data.new_system[data.new_system.length - 1];
+                    document.getElementById('memory-counter').textContent = `${latest.memory_mb} MB`;
+                    document.getElementById('cpu-counter').textContent = `${latest.cpu_percent}%`;
+                }
             } catch (err) { console.error("Polling fault:", err); }
         }
 
@@ -474,17 +587,18 @@
                     const r = data.report;
                     document.getElementById('health-score').textContent = `${r.summary.health_score}/100`;
                     document.getElementById('jank-percentage').textContent = `${r.summary.jank_percentage}%`;
-                    document.getElementById('avg-ui').textContent = `${r.summary.average_ui_time_ms}ms`;
-                    document.getElementById('avg-raster').textContent = `${r.summary.average_raster_time_ms}ms`;
+                    document.getElementById('memory-counter').textContent = `${r.summary.peak_memory_mb} MB`;
+                    document.getElementById('cpu-counter').textContent = `${r.summary.peak_cpu_percent}%`;
 
-                    renderFinalCharts(r.frames, r.battery);
+                    renderFinalCharts(r.frames, r.battery, r.system || []);
                 }
             } catch (err) { alert("Processing timeout."); } finally { document.getElementById('startBtn').disabled = false; }
         }
 
-        function renderFinalCharts(frames, battery) {
+        function renderFinalCharts(frames, battery, system) {
             if(frameChart) frameChart.destroy();
             if(batteryChart) batteryChart.destroy();
+            if(systemChart) systemChart.destroy();
             
             activeFrameCache = frames;
 
@@ -518,6 +632,23 @@
                 options: bOpts
             });
             resizeChartCanvas(batteryChart, 'batteryChartContainer');
+
+            if (system && system.length > 0) {
+                const ctxS = document.getElementById('systemChart').getContext('2d');
+                const sds = systemDatasetStyle(systemChartType);
+                sds[0].data = system.map(s => s.memory_mb);
+                sds[1].data = system.map(s => s.cpu_percent);
+
+                const sOpts = systemChartOptions();
+                sOpts.scales.x.ticks.maxTicksLimit = 30;
+
+                systemChart = new Chart(ctxS, {
+                    type: systemChartType, plugins: [stickyYAxisPlugin],
+                    data: { labels: system.map(s => `${s.time_sec}s`), datasets: sds },
+                    options: sOpts
+                });
+                resizeChartCanvas(systemChart, 'systemChartContainer');
+            }
         }
 
         function triggerExcelDownload() { window.location.href = '/api/export/excel'; }
